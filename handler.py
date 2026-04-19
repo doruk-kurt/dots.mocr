@@ -12,8 +12,6 @@ Parser mode is size-aware:
 - small jobs return inline markdown / JSON for convenience
 - larger jobs return a manifest of generated artifacts instead of forcing the
   entire parser output into the response body
-- if RunPod bucket credentials are configured, artifacts can be uploaded and
-  returned as durable URLs
 """
 
 import base64
@@ -64,14 +62,6 @@ GPU_MEMORY_UTILIZATION = os.getenv("GPU_MEMORY_UTILIZATION", "0.9")
 INLINE_RESPONSE_MAX_BYTES = int(os.getenv("INLINE_RESPONSE_MAX_BYTES", "1500000"))
 INLINE_RESPONSE_MAX_PAGES = int(os.getenv("INLINE_RESPONSE_MAX_PAGES", "2"))
 RESULTS_BASE_DIR = os.getenv("RESULTS_BASE_DIR", "/tmp/dots_mocr_results")
-UPLOAD_ARTIFACTS_BY_DEFAULT = _as_bool(
-    os.getenv("UPLOAD_ARTIFACTS_BY_DEFAULT"),
-    default=True,
-)
-KEEP_LOCAL_RESULTS_BY_DEFAULT = _as_bool(
-    os.getenv("KEEP_LOCAL_RESULTS_BY_DEFAULT"),
-    default=False,
-)
 
 ARTIFACT_KEY_ALIASES = {
     "md_content_path": "markdown",
@@ -323,8 +313,6 @@ def _extract_parser_job(job_input):
             default=False,
         ),
         "response_mode": _normalize_response_mode(job_input.get("response_mode")),
-        "upload_artifacts": job_input.get("upload_artifacts"),
-        "keep_results": job_input.get("keep_results"),
         "custom_prompt": job_input.get("custom_prompt"),
     }
 
@@ -461,38 +449,6 @@ def _collect_parser_pages(results, output_dir):
     return pages, artifact_records
 
 
-def _bucket_env_configured():
-    required = (
-        "BUCKET_ENDPOINT_URL",
-        "BUCKET_ACCESS_KEY_ID",
-        "BUCKET_SECRET_ACCESS_KEY",
-    )
-    return all(os.getenv(name) for name in required)
-
-
-def _resolve_upload_artifacts(parser_job):
-    requested = parser_job.get("upload_artifacts")
-    if requested is None:
-        return UPLOAD_ARTIFACTS_BY_DEFAULT and _bucket_env_configured()
-
-    enabled = _as_bool(requested)
-    if enabled and not _bucket_env_configured():
-        raise ValueError(
-            "upload_artifacts=true requires BUCKET_ENDPOINT_URL, "
-            "BUCKET_ACCESS_KEY_ID, and BUCKET_SECRET_ACCESS_KEY."
-        )
-    return enabled
-
-
-def _resolve_keep_results(parser_job, response_mode, upload_artifacts):
-    requested = parser_job.get("keep_results")
-    if requested is not None:
-        return _as_bool(requested)
-    if response_mode == "manifest" and not upload_artifacts:
-        return True
-    return KEEP_LOCAL_RESULTS_BY_DEFAULT
-
-
 def _estimate_inline_bytes(artifact_records, include_layout_image):
     total = 0
     for record in artifact_records:
@@ -534,11 +490,6 @@ def _resolve_response_mode(parser_job, artifact_records, page_count):
     return "inline", warnings
 
 
-def _add_local_paths(artifact_records):
-    for record in artifact_records:
-        record["artifact_payload"]["local_path"] = record["abs_path"]
-
-
 def _attach_inline_content(artifact_records, include_layout_image):
     for record in artifact_records:
         content = None
@@ -562,40 +513,12 @@ def _attach_inline_content(artifact_records, include_layout_image):
         if record["alias"] in {"markdown", "markdown_nohf", "layout_json"}:
             record["page_payload"][record["alias"]] = content
 
-
-def _upload_artifacts(job_id, artifact_records):
-    from runpod.serverless.utils.rp_upload import upload_file_to_bucket
-
-    uploaded_urls = {}
-    seen_paths = set()
-    safe_job_id = "".join(
-        char if char.isalnum() or char in {"-", "_"} else "_"
-        for char in str(job_id)
-    )
-
-    for record in artifact_records:
-        relative_path = record["relative_path"]
-        if relative_path in seen_paths:
-            continue
-        seen_paths.add(relative_path)
-        object_name = f"dots-mocr/{safe_job_id}/{relative_path.replace(os.sep, '/')}"
-        uploaded_urls[relative_path] = upload_file_to_bucket(object_name, record["abs_path"])
-
-    for record in artifact_records:
-        url = uploaded_urls.get(record["relative_path"])
-        if url:
-            record["artifact_payload"]["url"] = url
-
-    return uploaded_urls
-
-
 def _parse_with_dots_parser(parser_job, job_id):
     """Run the official dots.mocr parser layer against the local vLLM server."""
     runtime = _load_parser_runtime()
     parser_class = runtime["parser_class"]
     prompt_modes = runtime["prompt_modes"]
     prompt_mode = parser_job["prompt_mode"]
-    keep_results = False
     output_dir = None
 
     if prompt_mode not in prompt_modes:
@@ -652,40 +575,16 @@ def _parse_with_dots_parser(parser_job, job_id):
             page_count=len(pages),
         )
 
-        upload_artifacts = _resolve_upload_artifacts(parser_job)
-        keep_results = _resolve_keep_results(
-            parser_job,
-            response_mode=response_mode,
-            upload_artifacts=upload_artifacts,
-        )
-        if keep_results:
-            _add_local_paths(artifact_records)
-
-        upload_error = None
-        uploaded_urls = {}
-        if upload_artifacts:
-            try:
-                uploaded_urls = _upload_artifacts(job_id, artifact_records)
-            except Exception as exc:
-                upload_error = str(exc)
-                warnings.append(
-                    "Artifact upload failed; returning local artifact references instead. "
-                    f"upload_error={_truncate_text(exc, 500)}"
-                )
-                if not keep_results:
-                    keep_results = True
-                    _add_local_paths(artifact_records)
-
         if response_mode == "inline":
             _attach_inline_content(
                 artifact_records,
                 include_layout_image=parser_job["include_layout_image"],
             )
-        elif not uploaded_urls and not keep_results:
+        else:
             warnings.append(
-                "The response contains only artifact metadata. Configure RunPod bucket "
-                "credentials or set keep_results=true if you need durable access to the "
-                "full parser outputs for larger jobs."
+                "The response contains artifact metadata only. Use response_mode=inline "
+                "for smaller inputs if your backend needs the full parser output in the "
+                "response body."
             )
 
         response = {
@@ -697,9 +596,6 @@ def _parse_with_dots_parser(parser_job, job_id):
             "parser_package": runtime["package"],
             "pages": pages,
             "artifacts": {
-                "bucket_configured": _bucket_env_configured(),
-                "uploaded_file_count": len(uploaded_urls),
-                "result_dir": output_dir if keep_results else None,
                 "inline_limits": {
                     "max_bytes": INLINE_RESPONSE_MAX_BYTES,
                     "max_pages": INLINE_RESPONSE_MAX_PAGES,
@@ -708,8 +604,6 @@ def _parse_with_dots_parser(parser_job, job_id):
         }
         if warnings:
             response["warnings"] = warnings
-        if upload_error:
-            response["upload_error"] = upload_error
         if len(pages) == 1:
             first_page = pages[0]
             if "markdown" in first_page:
@@ -722,7 +616,7 @@ def _parse_with_dots_parser(parser_job, job_id):
     finally:
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
-        if output_dir and not keep_results:
+        if output_dir:
             shutil.rmtree(output_dir, ignore_errors=True)
 
 

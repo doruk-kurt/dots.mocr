@@ -14,9 +14,7 @@ ENV PIP_NO_CACHE_DIR=1 \
     GPU_MEMORY_UTILIZATION=0.9 \
     INLINE_RESPONSE_MAX_BYTES=1500000 \
     INLINE_RESPONSE_MAX_PAGES=2 \
-    RESULTS_BASE_DIR=/tmp/dots_mocr_results \
-    UPLOAD_ARTIFACTS_BY_DEFAULT=1 \
-    KEEP_LOCAL_RESULTS_BY_DEFAULT=0
+    RESULTS_BASE_DIR=/tmp/dots_mocr_results
 
 # git is needed for the pinned upstream parser install.
 RUN apt-get update && apt-get install -y --no-install-recommends git \

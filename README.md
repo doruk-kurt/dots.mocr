@@ -73,8 +73,6 @@ Optional parser fields:
 - `fitz_preprocess`: default `true`
 - `include_layout_image`: default `false`
 - `response_mode`: `auto`, `inline`, or `manifest` with default `auto`
-- `upload_artifacts`: overrides automatic bucket upload behavior
-- `keep_results`: keep local parser outputs on disk instead of deleting them
 
 Response behavior:
 
@@ -82,7 +80,7 @@ Response behavior:
 - `response_mode=inline`: always inline parser content into the response
 - `response_mode=manifest`: always return artifact metadata instead of embedding content
 
-For production, use bucket-backed artifacts for larger PDFs instead of relying on very large sync responses.
+This worker is stateless. Your backend should persist the returned parser output if you need durable storage.
 
 Example:
 
@@ -94,8 +92,7 @@ curl -X POST "https://api.runpod.ai/v2/<ENDPOINT_ID>/runsync" \
     "input": {
       "url": "https://arxiv.org/pdf/1706.03762.pdf",
       "prompt_mode": "prompt_layout_all_en",
-      "response_mode": "auto",
-      "upload_artifacts": true
+      "response_mode": "auto"
     }
   }'
 ```
@@ -116,11 +113,11 @@ Typical manifest response:
       "artifacts": {
         "markdown": {
           "relative_path": "document/document_page_0.md",
-          "url": "https://..."
+          "size_bytes": 18234
         },
         "layout_json": {
           "relative_path": "document/document_page_0.json",
-          "url": "https://..."
+          "size_bytes": 94421
         }
       }
     }
@@ -158,21 +155,13 @@ curl -X POST "https://api.runpod.ai/v2/<ENDPOINT_ID>/runsync" \
 2. In RunPod Serverless, choose **Build from GitHub repo**.
 3. Point it to that repo.
 4. No custom start command is needed. The `Dockerfile` starts the worker.
-5. For larger parser jobs, configure bucket env vars so artifact manifests contain durable URLs.
-
-Recommended runtime env vars:
-
-- `BUCKET_ENDPOINT_URL`
-- `BUCKET_ACCESS_KEY_ID`
-- `BUCKET_SECRET_ACCESS_KEY`
+5. Have your backend call this endpoint and persist the returned results if you need durable storage.
 
 Useful optional runtime env vars:
 
 - `INLINE_RESPONSE_MAX_BYTES`
 - `INLINE_RESPONSE_MAX_PAGES`
 - `RESULTS_BASE_DIR`
-- `UPLOAD_ARTIFACTS_BY_DEFAULT`
-- `KEEP_LOCAL_RESULTS_BY_DEFAULT`
 
 ## Build-time notes
 
@@ -185,3 +174,4 @@ Useful optional runtime env vars:
 - This setup uses only `dots.mocr`. No additional layout model is required.
 - The Docker image pre-downloads the pinned model revision and enables `HF_HUB_OFFLINE=1` for more predictable cold starts.
 - The worker prefers the official `dots_mocr` package and falls back to `dots_ocr` only for backward compatibility.
+- For larger documents, prefer `/run` over `/runsync` and let your backend poll the job result before saving it.
