@@ -166,6 +166,7 @@ Useful optional runtime env vars:
 ## Build-time notes
 
 - `dots.mocr` is public, so no Hugging Face token is needed for the default build.
+- The image clones the pinned upstream `dots.mocr` repo into `/opt/DotsMOCR` and installs it with `pip install -e .` to match the official package layout used by the parser.
 - The Dockerfile downloads model weights during the image build. RunPod endpoint env vars are runtime settings; they do not change that build step.
 - If you need gated or private model access, build and push your own image from Docker Hub or another registry where you can control build secrets or build args.
 

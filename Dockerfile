@@ -21,10 +21,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
  && rm -rf /var/lib/apt/lists/*
 
 # Install the official dots.mocr parser layer plus the RunPod worker runtime.
-RUN python3 -m pip install -U \
-    "git+https://github.com/rednote-hilab/dots.mocr.git@${DOTS_MOCR_REF}" \
-    "runpod==1.9.0" \
-    "requests>=2.32,<3"
+# Use the upstream installation flow (clone + editable install) rather than
+# pip-from-git so the full dots_mocr package layout is available at runtime.
+RUN git clone https://github.com/rednote-hilab/dots.mocr.git /opt/DotsMOCR \
+ && cd /opt/DotsMOCR \
+ && git checkout "${DOTS_MOCR_REF}" \
+ && python3 -m pip install -U "runpod==1.9.0" "requests>=2.32,<3" \
+ && python3 -m pip install -e .
 
 # Pre-download a pinned model revision so cold starts do not hit Hugging Face.
 RUN python3 -c "import os; from huggingface_hub import snapshot_download; snapshot_download(os.environ['MODEL_NAME'], revision=os.environ['MODEL_REVISION'])"

@@ -347,6 +347,8 @@ def _load_parser_runtime():
 
     raise ImportError(
         "Unable to import dots.mocr parser package. "
+        "This deployment expects the upstream dots.mocr repo to be cloned into "
+        "the image and installed with `pip install -e .`. "
         + " | ".join(import_errors)
     )
 
