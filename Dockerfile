@@ -1,37 +1,40 @@
 FROM vllm/vllm-openai:v0.17.1
 
-ARG DOTS_MOCR_REF=23f3e5612fb8066d4034d5ecfc8f33a9243533eb
+ARG MODEL_NAME=rednote-hilab/dots.mocr
 ARG MODEL_REVISION=f5a115b
+ARG TOKENIZER_NAME=
+ARG TOKENIZER_REVISION=
+ARG BASE_PATH=/models
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    HF_HOME=/root/.cache/huggingface \
-    MODEL_NAME=rednote-hilab/dots.mocr \
+    BASE_PATH=${BASE_PATH} \
+    MODEL_NAME=${MODEL_NAME} \
     MODEL_REVISION=${MODEL_REVISION} \
+    TOKENIZER_NAME=${TOKENIZER_NAME} \
+    TOKENIZER_REVISION=${TOKENIZER_REVISION} \
+    HF_HOME=${BASE_PATH}/huggingface-cache \
+    HF_DATASETS_CACHE=${BASE_PATH}/huggingface-cache/datasets \
+    HUGGINGFACE_HUB_CACHE=${BASE_PATH}/huggingface-cache/hub \
+    HF_HUB_ENABLE_HF_TRANSFER=0 \
+    TOKENIZERS_PARALLELISM=false \
     SERVE_MODEL_NAME=model \
+    OPENAI_SERVED_MODEL_NAME_OVERRIDE=model \
     VLLM_PORT=8000 \
     TENSOR_PARALLEL_SIZE=1 \
-    GPU_MEMORY_UTILIZATION=0.9 \
-    INLINE_RESPONSE_MAX_BYTES=1500000 \
-    INLINE_RESPONSE_MAX_PAGES=2 \
-    RESULTS_BASE_DIR=/tmp/dots_mocr_results
+    GPU_MEMORY_UTILIZATION=0.9
 
-# git is needed for the pinned upstream parser install.
-RUN apt-get update && apt-get install -y --no-install-recommends git \
- && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install -U \
+    "huggingface_hub>=0.30,<1" \
+    "runpod==1.9.0" \
+    "requests>=2.32,<3"
 
-# Install the official dots.mocr parser layer plus the RunPod worker runtime.
-# Use the upstream installation flow (clone + editable install) rather than
-# pip-from-git so the full dots_mocr package layout is available at runtime.
-RUN git clone https://github.com/rednote-hilab/dots.mocr.git /opt/DotsMOCR \
- && cd /opt/DotsMOCR \
- && git checkout "${DOTS_MOCR_REF}" \
- && python3 -m pip install -U "runpod==1.9.0" "requests>=2.32,<3" \
- && python3 -m pip install -e .
+COPY download_model.py /download_model.py
+RUN mkdir -p "${BASE_PATH}" \
+ && python3 /download_model.py
 
-# Pre-download a pinned model revision so cold starts do not hit Hugging Face.
-RUN python3 -c "import os; from huggingface_hub import snapshot_download; snapshot_download(os.environ['MODEL_NAME'], revision=os.environ['MODEL_REVISION'])"
-ENV HF_HUB_OFFLINE=1
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 COPY handler.py /handler.py
 

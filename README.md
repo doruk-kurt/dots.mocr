@@ -1,153 +1,57 @@
 # dots.mocr RunPod Serverless
 
-RunPod Serverless worker for [rednote-hilab/dots.mocr](https://huggingface.co/rednote-hilab/dots.mocr).
+RunPod Serverless worker for serving [`rednote-hilab/dots.mocr`](https://huggingface.co/rednote-hilab/dots.mocr) through plain `vLLM`.
 
-This worker follows the current official `dots.mocr` deployment shape:
+This repo is intentionally limited to the OpenAI-compatible `vLLM` path:
 
 - serve `rednote-hilab/dots.mocr` through `vLLM`
-- run the official `dots.mocr` parser layer against the local `vLLM` server for PDF/image parsing
+- bake the pinned model snapshot into the image at build time
+- keep notebook / SDK usage unchanged through RunPod's `openai/v1` URL
 
-The image is pinned for reproducibility:
+There is no custom `dots.mocr` parser pipeline in this version of the worker.
 
-- `vllm/vllm-openai:v0.17.1`
-- `rednote-hilab/dots.mocr` repo at commit `23f3e5612fb8066d4034d5ecfc8f33a9243533eb`
-- model revision `f5a115b`
+## What stays the same
 
-## Why a separate repo
+If you already call the endpoint like this, you do not need to change your client:
 
-RunPod GitHub builds expect the deployment files at the repository root. This folder is meant to become the root of a dedicated deployment repo or branch.
+```python
+from openai import OpenAI
 
-The files that matter are:
-
-- `Dockerfile`
-- `handler.py`
-
-## What it exposes
-
-The worker supports two request modes.
-
-### 1. Parser mode
-
-Best for the full `dots.mocr` document pipeline.
-
-Input shape:
-
-```json
-{
-  "input": {
-    "url": "https://example.com/document.pdf",
-    "prompt_mode": "prompt_layout_all_en"
-  }
-}
+client = OpenAI(
+    api_key="<RUNPOD_API_KEY>",
+    base_url="https://api.runpod.ai/v2/<ENDPOINT_ID>/openai/v1",
+)
 ```
 
-Supported source keys:
+Use `model="model"` by default, or call `client.models.list()` and use the served model name returned by the endpoint.
 
-- `source`
-- `url`
-- `file`
-- `image`
-- `pdf`
-- `path`
+## Build behavior
 
-Supported prompt modes:
+The Docker build downloads the pinned model snapshot into an internal Hugging Face cache under `BASE_PATH`. At runtime, the container starts `vLLM` in offline mode so worker startup uses the baked snapshot instead of downloading weights again.
 
-- `prompt_layout_all_en`
-- `prompt_layout_only_en`
-- `prompt_ocr`
-- `prompt_grounding_ocr`
-- `prompt_web_parsing`
-- `prompt_scene_spotting`
-- `prompt_image_to_svg`
-- `prompt_general`
+Pinned defaults:
 
-Optional parser fields:
+- base image: `vllm/vllm-openai:v0.17.1`
+- model: `rednote-hilab/dots.mocr`
+- revision: `f5a115b`
 
-- `bbox`: `[x1, y1, x2, y2]` for `prompt_grounding_ocr`
-- `custom_prompt`: useful with `prompt_general`
-- `dpi`: default `200`
-- `num_thread`: default `64`
-- `temperature`: default `0.1`
-- `top_p`: default `0.9`
-- `max_completion_tokens`: default `16384`
-- `fitz_preprocess`: default `true`
-- `include_layout_image`: default `false`
-- `response_mode`: `auto`, `inline`, or `manifest` with default `auto`
+Useful build args:
 
-Response behavior:
+- `MODEL_NAME`: default `rednote-hilab/dots.mocr`
+- `MODEL_REVISION`: default `f5a115b`
+- `BASE_PATH`: default `/models`
+- `TOKENIZER_NAME`
+- `TOKENIZER_REVISION`
 
-- `response_mode=auto`: small jobs return inline markdown / JSON; larger jobs return an artifact manifest
-- `response_mode=inline`: always inline parser content into the response
-- `response_mode=manifest`: always return artifact metadata instead of embedding content
+Useful runtime env vars:
 
-This worker is stateless. Your backend should persist the returned parser output if you need durable storage.
-
-Example:
-
-```bash
-curl -X POST "https://api.runpod.ai/v2/<ENDPOINT_ID>/runsync" \
-  -H "Authorization: Bearer <RUNPOD_API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input": {
-      "url": "https://arxiv.org/pdf/1706.03762.pdf",
-      "prompt_mode": "prompt_layout_all_en",
-      "response_mode": "auto"
-    }
-  }'
-```
-
-Typical manifest response:
-
-```json
-{
-  "mode": "parser",
-  "source": "...",
-  "prompt_mode": "prompt_layout_all_en",
-  "page_count": 3,
-  "response_mode": "manifest",
-  "pages": [
-    {
-      "page_no": 0,
-      "filtered": false,
-      "artifacts": {
-        "markdown": {
-          "relative_path": "document/document_page_0.md",
-          "size_bytes": 18234
-        },
-        "layout_json": {
-          "relative_path": "document/document_page_0.json",
-          "size_bytes": 94421
-        }
-      }
-    }
-  ]
-}
-```
-
-### 2. Raw chat mode
-
-Best if you want plain `vLLM` OpenAI-compatible chat completions.
-
-```bash
-curl -X POST "https://api.runpod.ai/v2/<ENDPOINT_ID>/runsync" \
-  -H "Authorization: Bearer <RUNPOD_API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input": {
-      "model": "model",
-      "messages": [
-        {
-          "role": "user",
-          "content": [
-            {"type": "image_url", "image_url": {"url": "https://example.com/page.png"}},
-            {"type": "text", "text": "<|img|><|imgpad|><|endofimg|>Extract the text content from this image."}
-          ]
-        }
-      ]
-    }
-  }'
-```
+- `OPENAI_SERVED_MODEL_NAME_OVERRIDE`: default `model`
+- `TENSOR_PARALLEL_SIZE`
+- `GPU_MEMORY_UTILIZATION`
+- `CHAT_TEMPLATE_CONTENT_FORMAT`
+- `TRUST_REMOTE_CODE`
+- `VLLM_STARTUP_TIMEOUT`
+- `VLLM_REQUEST_TIMEOUT`
 
 ## RunPod deployment
 
@@ -155,24 +59,14 @@ curl -X POST "https://api.runpod.ai/v2/<ENDPOINT_ID>/runsync" \
 2. In RunPod Serverless, choose **Build from GitHub repo**.
 3. Point it to that repo.
 4. No custom start command is needed. The `Dockerfile` starts the worker.
-5. Have your backend call this endpoint and persist the returned results if you need durable storage.
+5. Use the endpoint's `openai/v1` route from notebooks, apps, or the local test script.
 
-Useful optional runtime env vars:
+## Native API
 
-- `INLINE_RESPONSE_MAX_BYTES`
-- `INLINE_RESPONSE_MAX_PAGES`
-- `RESULTS_BASE_DIR`
+The worker also keeps a minimal RunPod native handler for queue-based requests:
 
-## Build-time notes
+- `{"input": {"messages": [...]}}` proxies to `/v1/chat/completions`
+- `{"input": {"prompt": "..."}}` proxies to `/v1/completions`
+- `{"input": {"list_models": true}}` proxies to `/v1/models`
 
-- `dots.mocr` is public, so no Hugging Face token is needed for the default build.
-- The image clones the pinned upstream `dots.mocr` repo into `/opt/DotsMOCR` and installs it with `pip install -e .` to match the official package layout used by the parser.
-- The Dockerfile downloads model weights during the image build. RunPod endpoint env vars are runtime settings; they do not change that build step.
-- If you need gated or private model access, build and push your own image from Docker Hub or another registry where you can control build secrets or build args.
-
-## Notes
-
-- This setup uses only `dots.mocr`. No additional layout model is required.
-- The Docker image pre-downloads the pinned model revision and enables `HF_HUB_OFFLINE=1` for more predictable cold starts.
-- The worker prefers the official `dots_mocr` package and falls back to `dots_ocr` only for backward compatibility.
-- For larger documents, prefer `/run` over `/runsync` and let your backend poll the job result before saving it.
+This is only a thin wrapper around local `vLLM`. It does not implement parser-specific behavior.
